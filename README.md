@@ -6,12 +6,12 @@
 - [EIP-4200: Static relative jumps](#eip-4200-static-relative-jumps)
 - [EIP-4750: Functions](#eip-4750-functions)
 - [EIP-5450: Stack Validation](#eip-5450-stack-validation)
-- EIP-6206: JUMPF instruction
-- EIP-7480: Data section access instructions
-- EIP-663: Unlimited SWAP and DUP instructions
-- EIP-7069: Revamped CALL instructions (does not require EOF)
-- TBA: Contract Creation
-- TBA: Restrict code and gas introspection
+- [EIP-6206: JUMPF instruction](#eip-6206-jumpf-instruction)
+- [EIP-7480: Data section access instructions](#eip-7480-data-section-access-instructions)
+- EIP-663: Unlimited SWAP and DUP instructions (TODO)
+- EIP-7069: Revamped CALL instructions (does not require EOF) (TODO)
+- [TBA: Contract Creation](#tba-contract-creation)
+- TBA: Restrict code and gas introspection (TODO)
 
 *see [Opcode Table](https://docs.google.com/spreadsheets/d/e/2PACX-1vS0ungUTs_SkqaSrp7oghcOEZr3oCJJMcIR9rk42s4tAzggDLE4jAQDifXXZu9rNqq2BK-HnDP7bzB9/pubhtml) for the opcode description and pseudocode*
 
@@ -36,7 +36,7 @@ Validation steps (order may not be right):
         - check if there is no truncated instructions (when immediate_size of instruction out of bound)
         - check if instructions that refer to code section metadata (`CALLF`), container section body (`CREATE3, RETURNCONTRACT`) or data section body (`DATALOADN`) do have correct immediate value 
     - validate relative jumps. check `RJUMP`, `RJUMPI` and `RJUMPV` for valid jump destinations
-    - validate max stack height
+    - validate max stack height (EIP-5450: Stack Validation)
 - validate each sub-container in container section body by doing all the previous steps
 
 ### EIP-4200: Static relative jumps
@@ -57,6 +57,7 @@ This proposal introduces functions instead of frequent jumps and removes the nee
 code_section_index = read_uint16_be(current_code[pc+1])
 perform stack overflow check
 return_stack.push({current_code_idx, PC_post_intruction, operand_stack.height - types[code_section_index].inputs}) 
+current_code_index = code_section_index
 set PC to 0
 ```
 `return_stack` is a stack of items representing execution state to return to after function execution is finished. Limited to 1024 items. (Save current execution state)
@@ -81,3 +82,67 @@ Opcdes deprecated: `JUMP`, `JUMPI` \
 Possible opcode deprecation: `JUMPDEST` 
 
 ### EIP-5450: Stack Validation
+
+Perform stack validation on the bytecode (code section) at the deploy time, not at the run time as it is in legacy bytecode. This is done by checking number of stack items each instruction requires (underflow) and by checking maximum allowed stack height for the instruction to execute (overflow).
+
+Additional checks on `CALLF`, `RETF` \
+`CALLF` check if `type_section[immediate_arg].inputs` are less then `acc_stack_height` (for underflow) and check if `type_section[immediate_arg].outputs` + `acc_stack_height` is less then `STACK_SIZE_LIMIT = 1024` (for overflow) \
+`RETF` check if `type_section[current_section].outputs` is equal to `acc_stack_height` \
+
+
+
+### EIP-6206: JUMPF instruction
+
+`JUMPF` Jump to a code section without adding a new return stack frame.
+
+It is common for functions to make a call at the end of the routine only to then return. `JUMPF` optimizes this behavior by changing code sections without needing to update the return stack
+
+Warks the same as `CALLF` except that `JUMPF` does not push to `return_stack`.
+
+The code section must be `non-returning`. This can be checked by reading `type_section[i].outputs == 0x80` \
+(The first code section MUST have 0 inputs and be non-returning)
+
+### EIP-7480: Data section access instructions
+
+Four new instrutions are introduced, that allow to read EOF container’s data section: 
+
+`DATALOAD` Pushes 32-byte word to stack from EOF container's data section \
+`DATALOADN` Pushes 32-byte immediate argument word to stack
+ from EOF container's data section \
+`DATASIZE` Pushes data section size to the stack \
+`DATACOPY` Copies a segment of data section to memory 
+
+### TBA: Contract Creation
+
+`CREATE3` Create a new account with associated code (EOF container/sub-container)
+
+```
+initcontainer_index = read_uint8_be(code[pc+1])
+endowment, salt, input_offset, input_size = stack.pop(4)
+initcontainer = get_sub_container(initcontainer_index)
+if initcontainer_size > MAX_INITCODE_SIZE:
+  abort
+return_val, addr, return_gas, success = vm.create3(
+                                        initcontainer, gas, salt, endowment)
+success ? stack.push(addr) : stack.push(0)
+contract.gas += return_gas
+```
+
+`CREATE4` Create a new account with associated code (EOF container).
+Expects initcontainer to be in transaction context. \
+Introduces new transaction type which has a new filed `initcodes` of type `[][]byte`.
+Does the same thing as `CREATE3` except it loads initcontainer from transaction context.
+
+successful `vm.create3/vm.create4` execution ends with initcode executing `RETURNCONTRACT`
+
+`RETURNCONTRACT` Fetch sub-container and append data to it
+
+```
+deploy_container_index = read_uint8_be(code[pc+1])
+aux_data_offset = stack.pop()
+deploy_container = get_sub_container(deploy_container_index)
+size = (data_section_offset + data_section_size) - deploy_container.size()
+aux_data = memory[aux_data_offset:aux_data_offset+size]
+deploy_container.append(aux_data)
+exec_scope.deploy_container = deploy_container # will set this as code for newly create account
+```
